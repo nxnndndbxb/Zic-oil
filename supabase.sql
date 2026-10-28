@@ -3,6 +3,7 @@
 -- Dashboard -> SQL Editor -> New query -> paste -> Run
 -- ==============================================
 
+-- 1. Products Table
 create table if not exists products (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -16,16 +17,17 @@ alter table products add column if not exists series text;
 alter table products add column if not exists api_grade text;
 alter table products add column if not exists size_label text;
 
+-- 2. Customers Table
 create table if not exists customers (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
-  name text, mobile text, vehicle text, next_visit date,
+  name text, mobile text, vehicle text, next_visit date, car_model text,
   created_at timestamptz default now()
 );
+-- Adding car_model if it was missing in older versions
+alter table customers add column if not exists car_model text;
 
--- Oil change worker/labour charges (invoice ke saath save hotay hain)
-alter table invoices add column if not exists service_charges numeric default 0;
-
+-- 3. Invoices Table (Table pehle banayenge, baad mein column add karenge)
 create table if not exists invoices (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -34,7 +36,11 @@ create table if not exists invoices (
   payment_type text, paid numeric default 0, date timestamptz,
   created_at timestamptz default now()
 );
+-- Oil change worker/labour charges (invoice ke saath save hotay hain)
+alter table invoices add column if not exists service_charges numeric default 0;
 
+
+-- 4. Expenses Table
 create table if not exists expenses (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -42,6 +48,7 @@ create table if not exists expenses (
   created_at timestamptz default now()
 );
 
+-- 5. Incomes Table
 create table if not exists incomes (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -49,6 +56,7 @@ create table if not exists incomes (
   created_at timestamptz default now()
 );
 
+-- 6. Purchases Table
 create table if not exists purchases (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -57,6 +65,7 @@ create table if not exists purchases (
   created_at timestamptz default now()
 );
 
+-- 7. Suppliers Table
 create table if not exists suppliers (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -64,6 +73,7 @@ create table if not exists suppliers (
   created_at timestamptz default now()
 );
 
+-- 8. Settings Table
 create table if not exists settings (
   user_id uuid primary key references auth.users(id) on delete cascade,
   businessname text, owner text, currency text,
@@ -73,7 +83,7 @@ alter table settings add column if not exists phone text;
 alter table settings add column if not exists address text;
 alter table settings add column if not exists terms text;
 
--- ===== Udhar (Credit) Ledger — kabhi overwrite nahi hota =====
+-- 9. Udhar (Credit) Ledger — kabhi overwrite nahi hota
 create table if not exists ledger (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -85,7 +95,7 @@ create table if not exists ledger (
   created_at timestamptz default now()
 );
 
--- ===== Oil Change / Workshop Service Records =====
+-- 10. Oil Change / Workshop Service Records
 create table if not exists services (
   id bigint primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
@@ -99,7 +109,9 @@ create table if not exists services (
   created_at timestamptz default now()
 );
 
--- Security: har user sirf apna data dekhe / edit kare (row level security)
+-- ==============================================
+-- SECURITY: Har user sirf apna data dekhe / edit kare
+-- ==============================================
 alter table products enable row level security;
 alter table customers enable row level security;
 alter table invoices enable row level security;
@@ -111,6 +123,19 @@ alter table settings enable row level security;
 alter table ledger enable row level security;
 alter table services enable row level security;
 
+-- Drop policies if they exist to prevent errors on multiple runs
+drop policy if exists own_products on products;
+drop policy if exists own_customers on customers;
+drop policy if exists own_invoices on invoices;
+drop policy if exists own_expenses on expenses;
+drop policy if exists own_incomes on incomes;
+drop policy if exists own_purchases on purchases;
+drop policy if exists own_suppliers on suppliers;
+drop policy if exists own_settings on settings;
+drop policy if exists own_ledger on ledger;
+drop policy if exists own_services on services;
+
+-- Create Policies
 create policy own_products on products for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy own_customers on customers for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy own_invoices on invoices for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
@@ -129,6 +154,7 @@ insert into storage.buckets (id, name, public)
 values ('invoices', 'invoices', false)
 on conflict (id) do nothing;
 
+drop policy if exists own_invoice_files on storage.objects;
 create policy own_invoice_files on storage.objects for all
 using (
   bucket_id = 'invoices'
@@ -138,14 +164,40 @@ using (
   and auth.uid()::text = (storage.foldername(name))[1]
 );
 
+-- ==============================================
 -- Realtime sync on
-alter publication supabase_realtime add table products;
-alter publication supabase_realtime add table customers;
-alter publication supabase_realtime add table invoices;
-alter publication supabase_realtime add table expenses;
-alter publication supabase_realtime add table incomes;
-alter publication supabase_realtime add table purchases;
-alter publication supabase_realtime add table suppliers;
-alter publication supabase_realtime add table settings;
-alter publication supabase_realtime add table ledger;
-alter publication supabase_realtime add table services;
+-- ==============================================
+-- (Yeh block error nahi dega agar table pehle se add hai)
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table products;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table customers;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table invoices;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table expenses;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table incomes;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table purchases;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table suppliers;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table settings;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table ledger;
+  exception when duplicate_object then null; end;
+  begin
+    alter publication supabase_realtime add table services;
+  exception when duplicate_object then null; end;
+end $$;
