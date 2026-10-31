@@ -311,6 +311,7 @@ canvas.chart{width:100%!important;display:block;}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<base target="_blank">
 </head>
 <body>
 
@@ -370,6 +371,7 @@ canvas.chart{width:100%!important;display:block;}
       <div class="nav-sep">Reports</div>
       <div class="nav-item" data-view="analytics"><span class="ico">📈</span> Analytics</div>
       <div class="nav-sep">System</div>
+      <div class="nav-item" data-view="whatsapp"><span class="ico">💬</span> WhatsApp Auto-Sender</div>
       <div class="nav-item" data-view="settings"><span class="ico">⚙️</span> Settings</div>
     </nav>
     <div class="side-status">
@@ -1375,6 +1377,7 @@ function route() {
     purchases: 'Stock Purchases (Stock In)',
     suppliers: 'Suppliers & Distributors',
     analytics: 'Analytics & Financial Reports',
+    whatsapp: 'WhatsApp Automation — Auto Sender',
     settings: 'Settings & Business Profile'
   };
   $('sysTitle').textContent = titles[currentView] || 'Dealership Management System';
@@ -1987,7 +1990,7 @@ function viewInvoice(id) {
     ${bal > 0 ? `<button class="btn green" onclick="closeModal('invoiceModal');openReceivePayment('${i.id}')">💰 Receive Payment (${fmt(bal)})</button>` : ''}
     <button class="btn blue" onclick="downloadInvoicePdf('${i.id}',this)">⬇️ Download PDF</button>
     <button class="btn wa" onclick="shareInvoiceWhatsApp('${i.id}',this)">💬 Send via WhatsApp</button>
-    <button class="btn gold" onclick="shareInvoiceNative('${i.id}',this)">📤 Share PDF (All Apps)</button>
+    <button class="btn gold" onclick="shareInvoiceNative('${i.id}',this)">📤 Share Image (All Apps)</button>
     <button class="btn gray" onclick="printInvoice('${i.id}')">🖨️ Print</button>
     <button class="btn outline" onclick="closeModal('invoiceModal')">Close</button>`;
   openModal('invoiceModal');
@@ -2183,6 +2186,49 @@ function buildStructuredInvoiceMessage(i, c, pdfLink) {
   return L.join('\n');
 }
 
+/* =====================================================================
+   INVOICE IMAGE GENERATOR & IMAGE-BASED SHARING ENGINE
+   (Task 1 — WhatsApp/Social sharing sends a premium IMAGE, never text/PDF)
+===================================================================== */
+async function generateInvoiceImage(id) {
+  if (!window.html2canvas) {
+    throw new Error('Image engine load nahi ho saka. Please check your internet connection.');
+  }
+  const i = DB.invoices.find(x => String(x.id) === String(id));
+  if (!i) throw new Error('Invoice nahi mili');
+  const c = invCustomer(i.customerId);
+
+  const stage = $('pdfStage');
+  stage.innerHTML = invoiceDocHTML(i, c);
+  await new Promise(r => setTimeout(r, 120));
+  try {
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  } catch (e) {}
+  const node = stage.firstElementChild;
+  const canvas = await html2canvas(node, {
+    scale: 2.5, // high-resolution PNG (2.5x)
+    backgroundColor: '#ffffff',
+    useCORS: true,
+    logging: false
+  });
+  stage.innerHTML = '';
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob(b => (b ? resolve(b) : reject(new Error('PNG conversion failed'))), 'image/png');
+  });
+}
+
+function buildImageCaption(i, c) {
+  const bal = invoiceBalance(i);
+  const biz = DB.settings.businessName || 'ZIC OIL';
+  const L = [];
+  L.push(`🧾 *Invoice ${i.number}* — ${biz}`);
+  L.push(`Customer: ${c.name}`);
+  L.push(`Total: ${fmt(i.total)}${bal > 0 ? ` | Balance Due: ${fmt(bal)}` : ' | PAID ✓'}`);
+  L.push(`Date: ${niceDate(i.date)}`);
+  if (DB.settings.phone) L.push(`Contact: ${DB.settings.phone}`);
+  return L.join('\n');
+}
+
 async function shareInvoiceWhatsApp(id, btn) {
   const i = DB.invoices.find(x => String(x.id) === String(id));
   if (!i) return;
@@ -2191,30 +2237,32 @@ async function shareInvoiceWhatsApp(id, btn) {
     toast('Customer ka valid mobile number darj nahi hai (03XX-XXXXXXX format)', 'err');
     return;
   }
-  setBusy(btn, true, '⏳ Preparing PDF link…');
+  setBusy(btn, true, '⏳ Generating invoice image…');
   try {
-    let pdfUrl = null;
-    if (sbUser && sb && cloudReady) {
-      const blob = await generateInvoicePdf(id);
-      const filePath = `${sbUser.id}/${i.number}.pdf`;
-      const { error: upErr } = await sb.storage.from(INVOICE_BUCKET).upload(filePath, blob, {
-        upsert: true,
-        contentType: 'application/pdf'
-      });
-      if (!upErr) {
-        const { data: signData } = await sb.storage.from(INVOICE_BUCKET).createSignedUrl(filePath, 7 * 24 * 3600);
-        if (signData && signData.signedUrl) {
-          pdfUrl = signData.signedUrl;
-        }
+    const blob = await generateInvoiceImage(id);
+    const filename = `${(DB.settings.businessName || 'ZIC-Oil').replace(/\s+/g, '-')}-${i.number}.png`;
+    const file = new File([blob], filename, { type: 'image/png' });
+    const caption = buildImageCaption(i, c);
+
+    // PRIMARY FLOW: native share sheet with the IMAGE attached (mobile browsers)
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ title: `Invoice ${i.number}`, text: caption, files: [file] });
+        toast('Invoice image shared!');
+        return;
+      } catch (e) {
+        if (e.name === 'AbortError') return; // user cancelled the share sheet
+        // fall through to desktop fallback
       }
     }
-    const msg = buildStructuredInvoiceMessage(i, c, pdfUrl);
-    openWhatsApp(c.mobile, msg);
-    toast('WhatsApp chat ready with invoice summary & PDF link');
+
+    // DESKTOP FALLBACK: download the PNG image and open WhatsApp chat
+    // (user attaches the downloaded image manually — image remains the primary content)
+    downloadBlob(blob, filename);
+    openWhatsApp(c.mobile, caption);
+    toast('Invoice image downloaded & WhatsApp chat opened — downloaded image attach kar dein');
   } catch (e) {
-    console.error('WhatsApp share error:', e);
-    const msg = buildStructuredInvoiceMessage(i, c, null);
-    openWhatsApp(c.mobile, msg);
+    toast(e.message || 'Invoice image generate nahi ho saki', 'err');
   } finally {
     setBusy(btn, false);
   }
@@ -2224,23 +2272,17 @@ async function shareInvoiceNative(id, btn) {
   const i = DB.invoices.find(x => String(x.id) === String(id));
   if (!i) return;
   const c = invCustomer(i.customerId);
-  setBusy(btn, true, '⏳ Generating PDF…');
+  setBusy(btn, true, '⏳ Generating invoice image…');
   try {
-    const blob = await generateInvoicePdf(id);
-    const filename = `${(DB.settings.businessName || 'ZIC-Oil').replace(/\s+/g, '-')}-${i.number}.pdf`;
-    const file = new File([blob], filename, { type: 'application/pdf' });
-    const textMsg = buildStructuredInvoiceMessage(i, c, null);
-
+    const blob = await generateInvoiceImage(id);
+    const filename = `${(DB.settings.businessName || 'ZIC-Oil').replace(/\s+/g, '-')}-${i.number}.png`;
+    const file = new File([blob], filename, { type: 'image/png' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({
-        title: `Invoice ${i.number}`,
-        text: textMsg,
-        files: [file]
-      });
+      await navigator.share({ title: `Invoice ${i.number}`, text: buildImageCaption(i, c), files: [file] });
       toast('Shared successfully!');
     } else {
       downloadBlob(blob, filename);
-      toast('Native file sharing not supported on this device. PDF downloaded.', 'info');
+      toast('Native file sharing not supported on this device. Image downloaded.', 'info');
     }
   } catch (e) {
     if (e.name !== 'AbortError') {
@@ -2248,6 +2290,175 @@ async function shareInvoiceNative(id, btn) {
     }
   } finally {
     setBusy(btn, false);
+  }
+}
+
+/* =====================================================================
+   FREE WHATSAPP AUTO-SENDER — TASK 2
+   QR-scan based Node.js service (whatsapp-web.js). NO Meta Cloud API,
+   NO paid service, NO third-party gateway.
+   ⚠️ ANTI-BAN WARNING (also shown in the admin UI):
+   "Sending too many messages too fast can cause WhatsApp to temporarily
+   or permanently ban your number. This service queues messages with a
+   fixed delay (MESSAGE_DELAY_MS). Do NOT lower the delay. Use a dedicated
+   business number and keep volumes reasonable."
+===================================================================== */
+const WA_SERVICE_KEY = 'zic_wa_service_url';
+let waPollTimer = null;
+
+function getWaServiceUrl() {
+  try {
+    return (localStorage.getItem(WA_SERVICE_KEY) || 'http://localhost:3001').replace(/\/+$/, '');
+  } catch (e) {
+    return 'http://localhost:3001';
+  }
+}
+function setWaServiceUrl(u) {
+  try {
+    localStorage.setItem(WA_SERVICE_KEY, (u || '').trim() || 'http://localhost:3001');
+  } catch (e) {}
+}
+function waStopPolling() {
+  if (waPollTimer) { clearInterval(waPollTimer); waPollTimer = null; }
+}
+
+/* Auto-send invoice IMAGE after a new sale — NEVER blocks the sale */
+async function autoSendInvoiceWhatsApp(invoiceId) {
+  try {
+    const i = DB.invoices.find(x => String(x.id) === String(invoiceId));
+    if (!i) return;
+    const c = invCustomer(i.customerId);
+    const num = waNumber(c.mobile);
+    if (!num) {
+      toast('WhatsApp auto-send skipped: customer ka valid number nahi hai', 'info');
+      return;
+    }
+    const blob = await generateInvoiceImage(invoiceId);
+    const imageBase64 = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1] || '');
+      r.onerror = () => reject(new Error('Image read failed'));
+      r.readAsDataURL(blob);
+    });
+    const res = await fetch(`${getWaServiceUrl()}/send-invoice`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        number: num,
+        imageBase64,
+        caption: buildImageCaption(i, c),
+        invoiceNumber: i.number,
+        fileName: `${i.number}.png`
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `Service error (${res.status})`);
+    }
+    toast(`📤 Invoice image queued → ${c.name} (${i.number})`);
+  } catch (e) {
+    // Error handling per spec: notify via toast, NEVER block the sale
+    toast(`WhatsApp auto-send failed: ${e.message} — WhatsApp admin page par service check karein`, 'err');
+  }
+}
+
+/* =====================================================================
+   VIEW: WHATSAPP ADMIN PAGE (polls /status every 4 seconds)
+===================================================================== */
+Views.whatsapp = function() {
+  waStopPolling();
+  const url = getWaServiceUrl();
+  $('content').innerHTML = `
+  <div class="page-head">
+    <div><h2>WhatsApp Auto-Sender</h2><div class="sub">FREE QR-based service — no paid API. Har nayi sale par invoice image customer ko automatically bheji jati hai.</div></div>
+    <button class="btn blue" onclick="refreshWaStatus()">🔄 Refresh Status</button>
+  </div>
+  <div class="notice">⚠️ <span><b>Anti-Ban Warning:</b> Bohat zyada messages tezi se bhejne se WhatsApp aapka number temporarily ya permanently <b>ban</b> kar sakta hai. Ye service messages ko fixed delay (<b>MESSAGE_DELAY_MS</b>, minimum 5000ms) ke saath queue karti hai. Delay kam <b>na</b> karein. Dedicated business number istemal karein aur volume reasonable rakhein.</span></div>
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-head"><h3><span class="ph-ico">📱</span> Connection Status</h3><span class="tag gray" id="waStatusBadge">Checking…</span></div>
+      <div class="panel-body">
+        <div id="waQrBox" style="text-align:center;padding:10px;min-height:120px"></div>
+        <div id="waStatusInfo" class="cell-sub" style="text-align:center;margin-top:8px"></div>
+        <div style="display:flex;gap:9px;justify-content:center;margin-top:14px;flex-wrap:wrap">
+          <button class="btn red" onclick="waDisconnect(this)">🔌 Disconnect / Logout</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3><span class="ph-ico">🔧</span> Service Configuration</h3></div>
+      <div class="panel-body">
+        <div class="field"><label>WhatsApp Service URL</label><input id="waServiceUrl" value="${esc(url)}" placeholder="http://localhost:3001"><div class="hint">Default: http://localhost:3001 — yeh value browser (localStorage) mein save ho jati hai</div></div>
+        <button class="btn primary" onclick="saveWaUrl()">💾 Save Service URL</button>
+        <h4 style="font-size:13px;margin:18px 0 8px;color:#4b5563">📋 Setup Instructions (one-time)</h4>
+        <ol style="font-size:13px;line-height:1.9;color:#4b5563;padding-left:20px">
+          <li>Node.js (v18+) install karein — check: <code>node -v</code></li>
+          <li>Service folder mein run karein: <code>npm install</code></li>
+          <li>Service start karein: <code>node server.js</code></li>
+          <li>Left side par QR code aaye ga — apne <b>business WhatsApp</b> se scan karein (WhatsApp → Settings → Linked Devices → Link a Device)</li>
+          <li>Status <b>🟢 Connected</b> ho jaye to har nayi sale par invoice image auto-send hogi</li>
+        </ol>
+      </div>
+    </div>
+  </div>`;
+  refreshWaStatus();
+  // Poll /status every 4 seconds while this view is open; stop when leaving
+  waPollTimer = setInterval(() => {
+    if (currentView !== 'whatsapp') { waStopPolling(); return; }
+    refreshWaStatus(true);
+  }, 4000);
+};
+
+async function refreshWaStatus(silent) {
+  const badge = $('waStatusBadge'), box = $('waQrBox'), info = $('waStatusInfo');
+  if (!badge || !box) return;
+  try {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 3500);
+    const res = await fetch(`${getWaServiceUrl()}/status`, { signal: ctrl.signal });
+    clearTimeout(to);
+    const d = await res.json();
+    if (d.connected) {
+      badge.className = 'tag green';
+      badge.textContent = '🟢 Connected';
+      box.innerHTML = `<div style="font-size:44px;padding:20px">✅</div><div style="font-weight:700;font-size:15px">WhatsApp Connected</div>`;
+      info.innerHTML = d.me ? `Number: <b>${esc(d.me.wid || '')}</b>${d.me.pushname ? ` — ${esc(d.me.pushname)}` : ''}${d.queueLength ? ` • Queue: ${d.queueLength}` : ''}` : '';
+    } else if (d.qrImage) {
+      badge.className = 'tag orange';
+      badge.textContent = '🟡 Waiting for QR Scan';
+      box.innerHTML = `<img src="${d.qrImage}" alt="WhatsApp QR Code" style="width:280px;max-width:100%;border:1px solid var(--border);border-radius:10px"><div class="cell-sub" style="margin-top:8px">WhatsApp → Settings → Linked Devices → Link a Device</div>`;
+      info.textContent = 'QR code se apna business WhatsApp link karein';
+    } else {
+      badge.className = 'tag gray';
+      badge.textContent = '🟡 Connecting…';
+      box.innerHTML = `<div style="font-size:44px;padding:20px">⏳</div><div style="font-weight:700">Client initialize ho raha hai…</div>`;
+      info.textContent = (d && d.error) ? esc(d.error) : 'Thora wait karein, phir Refresh Status dabayein';
+    }
+  } catch (e) {
+    badge.className = 'tag red';
+    badge.textContent = '🔴 Offline';
+    box.innerHTML = `<div style="font-size:44px;padding:20px">🔌</div><div style="font-weight:700">WhatsApp service reachable nahi</div>`;
+    info.innerHTML = `Service URL: <b>${esc(getWaServiceUrl())}</b> — kya <code>node server.js</code> chal raha hai?`;
+  }
+}
+
+function saveWaUrl() {
+  const v = ($('waServiceUrl').value || '').trim() || 'http://localhost:3001';
+  setWaServiceUrl(v);
+  toast(`WhatsApp service URL saved: ${v}`);
+  refreshWaStatus();
+}
+
+async function waDisconnect(btn) {
+  setBusy(btn, true, '⏳ Disconnecting…');
+  try {
+    await fetch(`${getWaServiceUrl()}/logout`, { method: 'POST' });
+    toast('WhatsApp disconnected — naya QR generate ho raha hai', 'info');
+  } catch (e) {
+    toast('Service offline hai — logout nahi ho saka', 'err');
+  } finally {
+    setBusy(btn, false);
+    refreshWaStatus();
   }
 }
 
@@ -2501,6 +2712,8 @@ async function saveInvoice() {
   setBusy(btn, false);
   toast(`Sale complete — ${inv.number} (${fmt(total)})`);
   viewInvoice(id);
+  // Task 2: auto-send invoice IMAGE via free WhatsApp service (never blocks the sale)
+  autoSendInvoiceWhatsApp(id);
 }
 
 /* =====================================================================
